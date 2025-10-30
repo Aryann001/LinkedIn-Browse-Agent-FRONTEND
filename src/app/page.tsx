@@ -10,6 +10,7 @@ interface LogEntry {
   message: string;
   author?: string;
   comment?: string;
+  isDryRun?: boolean; // <-- FIX 1: Add isDryRun flag
 }
 
 export default function Home() {
@@ -28,7 +29,8 @@ export default function Home() {
   // Function to add a new log and scroll to bottom
   const addLog = (newLogData: Omit<LogEntry, "id">) => {
     logIdCounter.current += 1;
-    const newLog: LogEntry = { ...newLogData, id: logIdCounter.current };
+    // Ensure all logs have the isDryRun property, default to false
+    const newLog: LogEntry = { isDryRun: false, ...newLogData, id: logIdCounter.current };
     setLogs((prevLogs) => [...prevLogs, newLog]);
   };
 
@@ -48,8 +50,6 @@ export default function Home() {
     };
 
     ws.current.onclose = () => {
-      // This will no longer incorrectly fire on "Start"
-      // It will only fire if the server truly disconnects
       setStatus("Disconnected. Please refresh the page.");
       console.log("WebSocket disconnected");
       if (isRunning) {
@@ -73,13 +73,9 @@ export default function Home() {
         console.log("Received data:", data);
 
         if (data.type === "status") {
-          // --- THIS IS THE FIX ---
-          // 1. Update the small status line
           setStatus(data.message);
-          // 2. ALSO add the status to the main log box
           addLog({ type: "status", message: data.message });
 
-          // 3. Check if the run is finished
           if (data.message.includes("Agent run finished")) {
             setIsRunning(false);
           }
@@ -90,13 +86,21 @@ export default function Home() {
           setStatus(`Error: ${data.message}`);
           setIsRunning(false); // Stop on error
         } else if (data.type === "result" && data.log) {
+          
+          // --- FIX 2: Check for Dry Run ---
           const log = data.log;
+          const isDryRun = !log.posted_to_linkedin; // Check if it was NOT posted
+          const actionText = isDryRun ? "Generated (DRY RUN)" : "Successfully POSTED";
+
           addLog({
             type: "result",
-            message: `Commented on ${log.post_author}'s post.`,
+            message: `${actionText} comment for ${log.post_author}'s post.`,
             author: log.post_author,
             comment: log.generated_comment,
+            isDryRun: isDryRun, // Pass the flag to the log entry
           });
+          // --- End of Fix ---
+
         } else if (data.type === "summary") {
           addLog({ type: "summary", message: data.message });
         }
@@ -110,10 +114,7 @@ export default function Home() {
       ws.current?.close();
     };
 
-    // --- THIS IS THE FIX ---
-    // The dependency array is now empty. This hook will run ONCE
-    // on mount and the WebSocket will stay open.
-  }, []);
+  }, []); // Your stable empty dependency array
 
   const startAgent = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -151,7 +152,6 @@ export default function Home() {
       if (!response.ok)
         throw new Error(result.detail || "Failed to start agent");
 
-      // Also log the initial "Started" message
       addLog({ type: "status", message: result.message });
     } catch (err: any) {
       console.error("Failed to start agent:", err);
@@ -171,16 +171,22 @@ export default function Home() {
         return <span className="text-gray-400 italic">-- {log.message}</span>;
       case "log":
         return <span className="text-sky-400">{log.message}</span>;
+      
+      // --- FIX 3: Update Render Logic ---
       case "result":
+        const isDryRun = log.isDryRun; // Use the flag from the log entry
         return (
-          <div className="rounded-md p-2 border-l-2 border-green-500 bg-green-900/20">
-            <span className="font-semibold text-green-400">Success:</span>
-            <span className="text-gray-100">
-              {" "}
-              Commented on {log.author}'s post.
+          <div className={`rounded-md p-2 border-l-2 ${isDryRun ? 'border-blue-500 bg-blue-900/20' : 'border-green-500 bg-green-900/20'}`}>
+            <span className={`font-semibold ${isDryRun ? 'text-blue-400' : 'text-green-400'}`}>
+              {isDryRun ? 'Dry Run:' : 'Success:'}
             </span>
+            <span className="text-gray-100"> {log.message}</span>
+            {/* Also show the comment that was generated/posted */}
+            <p className="whitespace-pre-wrap pl-4 font-sans text-sm text-gray-400 italic">"{log.comment}"</p>
           </div>
         );
+      // --- End of Fix ---
+
       case "summary":
         return (
           <div className="rounded-md p-2 border-l-2 border-indigo-400 bg-indigo-900/20">
@@ -265,15 +271,20 @@ export default function Home() {
                   type="number"
                   id="maxPosts"
                   className="mt-2 block w-full rounded-md border-0 py-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6"
-                  value={maxPosts}
+                  
+                  // --- FIX 4: NaN fix ---
+                  value={maxPosts} // This is correct
                   onChange={(e) => {
                     const value = parseInt(e.target.value);
-                    // If parseInt results in NaN (e.g., empty input), or less than 1, set to 1.
-                    // Otherwise, use the parsed value. We also keep the max limit.
-                    setMaxPosts(
-                      isNaN(value) || value < 1 ? 1 : Math.min(value, 20)
-                    );
+                    // This logic prevents NaN from ever being set in the state
+                    if (isNaN(value)) {
+                      setMaxPosts(1); // Default to 1 if input is empty or invalid
+                    } else {
+                      setMaxPosts(Math.min(Math.max(value, 1), 20)); // Clamp between 1 and 20
+                    }
                   }}
+                  // --- End of Fix ---
+
                   disabled={isRunning}
                   min="1"
                   max="20"
